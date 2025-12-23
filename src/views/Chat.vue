@@ -38,11 +38,53 @@
       <!-- 右侧聊天区域 -->
       <a-col :xs="24" :sm="24" :md="18" :lg="19" class="overflow-hidden h-full">
         <div class="chat-panel overflow-hidden">
+          <!-- 文档选择区域 -->
+          <div class="document-section">
+            <div class="document-header">
+              <span class="document-title">
+                <FileTextOutlined />
+                选择文档
+              </span>
+              <a-upload
+                :file-list="[]"
+                :before-upload="handleBeforeUpload"
+                :multiple="true"
+                :show-upload-list="false"
+              >
+                <a-button type="primary" size="small" :loading="isUploading">
+                  <template #icon><UploadOutlined /></template>
+                  上传文档
+                </a-button>
+              </a-upload>
+            </div>
+            <div class="document-list">
+              <a-spin :spinning="isLoadingDocuments">
+                <div v-if="uploadedDocuments.length === 0" class="no-documents">
+                  暂无已上传的文档，请先上传文档
+                </div>
+                <div v-else class="document-items">
+                  <div
+                    v-for="doc in uploadedDocuments"
+                    :key="doc.filename"
+                    class="document-item"
+                    :class="{ selected: selectedDocument === doc.filename }"
+                    @click="selectDocument(doc)"
+                  >
+                    <component :is="getDocumentIcon(doc.filename)" class="doc-icon" />
+                    <span class="doc-name">{{ doc.filename }}</span>
+                    <CheckCircleFilled v-if="selectedDocument === doc.filename" class="check-icon" />
+                  </div>
+                </div>
+              </a-spin>
+            </div>
+          </div>
+
           <!-- 聊天消息区 -->
           <div class="chat-messages" ref="messagesContainer">
             <div v-if="currentMessages.length === 0" class="empty-chat">
               <RobotOutlined class="empty-icon" />
               <p>开始和 AI 助手对话吧！</p>
+              <p v-if="!selectedDocument" class="empty-tip">请先选择一个文档进行问答</p>
             </div>
             <ChatMessage
               v-for="(msg, index) in currentMessages"
@@ -57,47 +99,21 @@
 
           <!-- 输入区域 -->
           <div class="chat-input-wrapper">
-            <!-- 已选择的文件列表 -->
-            <div v-if="selectedFiles.length > 0" class="selected-files">
-              <div
-                v-for="(file, index) in selectedFiles"
-                :key="index"
-                class="file-item"
-              >
-                <div class="file-info">
-                  <component :is="getFileIcon(file)" class="file-icon" />
-                  <span class="file-name">{{ file.name }}</span>
-                  <span class="file-size">{{ formatFileSize(file.size) }}</span>
-                </div>
-                <a-button
-                  type="text"
-                  size="small"
-                  danger
-                  @click="removeFile(index)"
-                >
-                  <template #icon><CloseOutlined /></template>
-                </a-button>
-              </div>
+            <!-- 当前选中的文档提示 -->
+            <div v-if="selectedDocument" class="selected-document-tip">
+              <FileTextOutlined />
+              <span>当前文档：{{ selectedDocumentName }}</span>
             </div>
 
             <!-- 输入框和操作按钮 -->
             <div class="chat-input-area">
-              <a-upload
-                :file-list="[]"
-                :before-upload="handleBeforeUpload"
-                :multiple="true"
-                :show-upload-list="false"
-              >
-                <a-button type="text" class="upload-btn" :disabled="isLoading">
-                  <template #icon><PaperClipOutlined /></template>
-                </a-button>
-              </a-upload>
               <a-textarea
-                v-model:value="inputMessage"
+                :value="inputMessage"
+                @update:value="val => inputMessage = val"
                 placeholder="输入你的问题..."
                 :auto-size="{ minRows: 1, maxRows: 4 }"
                 @keydown="handleKeyDown"
-                :disabled="isLoading"
+                :disabled="isLoading || !selectedDocument"
                 class="message-input"
               />
               <a-button
@@ -113,8 +129,8 @@
 
             <!-- 提示信息 -->
             <div class="input-tips">
-              <span>支持上传图片、文档等文件</span>
-              <span>按 Enter 发送，Shift + Enter 换行</span>
+              <span v-if="!selectedDocument" class="warning-tip">请先选择一个文档</span>
+              <span v-else>按 Enter 发送，Shift + Enter 换行</span>
             </div>
           </div>
         </div>
@@ -132,17 +148,17 @@ import {
   DeleteOutlined,
   SendOutlined,
   RobotOutlined,
-  PaperClipOutlined,
-  CloseOutlined,
   FileImageOutlined,
   FilePdfOutlined,
   FileWordOutlined,
   FileExcelOutlined,
   FileTextOutlined,
-  FileOutlined
+  FileOutlined,
+  UploadOutlined,
+  CheckCircleFilled
 } from '@ant-design/icons-vue'
 import ChatMessage from '@/components/ChatMessage.vue'
-import { sendMessageApi, uploadFile } from '@/api/chat'
+import { sendMessageApi, uploadFile, getUploadedDocuments } from '@/api/chat'
 
 // 会话列表
 const sessions = ref([
@@ -157,7 +173,13 @@ const currentSessionId = ref('1')
 const inputMessage = ref('')
 const isLoading = ref(false)
 const messagesContainer = ref(null)
-const selectedFiles = ref([])
+
+// 文档相关状态
+const uploadedDocuments = ref([])
+const selectedDocument = ref(null)
+const selectedDocumentName = ref('')
+const isLoadingDocuments = ref(false)
+const isUploading = ref(false)
 
 // 当前会话的消息
 const currentMessages = computed(() => {
@@ -165,10 +187,82 @@ const currentMessages = computed(() => {
   return session ? session.messages : []
 })
 
-// 是否可以发送（有文字或有文件）
+// 是否可以发送（有文字且已选择文档）
 const canSend = computed(() => {
-  return inputMessage.value.trim() || selectedFiles.value.length > 0
+  const hasInput = inputMessage.value && String(inputMessage.value).trim().length > 0
+  const hasDocument = !!selectedDocument.value
+  return hasInput && hasDocument
 })
+
+// 获取已上传的文档列表
+const fetchDocuments = async () => {
+  isLoadingDocuments.value = true
+  try {
+    const res = await getUploadedDocuments()
+    // 根据接口返回格式处理数据
+    uploadedDocuments.value = res.documents
+  } catch (error) {
+    console.error('获取文档列表失败:', error)
+    message.error('获取文档列表失败')
+    uploadedDocuments.value = []
+  } finally {
+    isLoadingDocuments.value = false
+  }
+}
+
+// 选择文档
+const selectDocument = (doc) => {
+  selectedDocument.value = doc.filename
+  selectedDocumentName.value = doc.filename
+}
+
+// 文件上传前处理
+const handleBeforeUpload = (file) => {
+  // 限制文件大小 100MB
+  const maxSize = 100 * 1024 * 1024
+  if (file.size > maxSize) {
+    message.error(`文件 ${file.name} 超过 100MB 限制`)
+    return false
+  }
+
+  isUploading.value = true
+  uploadFile([file])
+    .then((res) => {
+      message.success('文件上传成功')
+      // 刷新文档列表
+      fetchDocuments()
+    })
+    .catch(() => {
+      message.error('文件上传失败')
+    })
+    .finally(() => {
+      isUploading.value = false
+    })
+  return false // 阻止自动上传
+}
+
+// 获取文档图标
+const getDocumentIcon = (filename) => {
+  if (!filename) return FileOutlined
+  const ext = filename.split('.').pop().toLowerCase()
+
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) {
+    return FileImageOutlined
+  }
+  if (ext === 'pdf') {
+    return FilePdfOutlined
+  }
+  if (['doc', 'docx'].includes(ext)) {
+    return FileWordOutlined
+  }
+  if (['xls', 'xlsx'].includes(ext)) {
+    return FileExcelOutlined
+  }
+  if (['txt', 'md', 'json', 'xml'].includes(ext)) {
+    return FileTextOutlined
+  }
+  return FileOutlined
+}
 
 // 创建新会话
 const createNewSession = () => {
@@ -179,15 +273,11 @@ const createNewSession = () => {
     messages: []
   })
   currentSessionId.value = newId
-  // 清空已选文件
-  selectedFiles.value = []
 }
 
 // 切换会话
 const switchSession = (id) => {
   currentSessionId.value = id
-  // 清空已选文件
-  selectedFiles.value = []
 }
 
 // 删除会话
@@ -212,77 +302,15 @@ const scrollToBottom = () => {
   })
 }
 
-// 文件上传前处理
-const filename = ref('')
-const handleBeforeUpload = (file) => {
-  // 限制文件大小 20MB
-  const maxSize = 100 * 1024 * 1024
-  if (file.size > maxSize) {
-    message.error(`文件 ${file.name} 超过 100MB 限制`)
-    return false
-  }
-
-  // 限制文件数量
-  if (selectedFiles.value.length >= 5) {
-    message.warning('最多只能上传 5 个文件')
-    return false
-  }
-
-  selectedFiles.value.push(file)
-  uploadFile(selectedFiles.value)
-    .then((res) => {
-      message.success('文件上传成功')
-      console.log(res)
-      filename.value = res.filename
-      console.log(filename.value)
-    })
-    .catch(() => {
-      message.error('文件上传失败')
-    })
-  return false // 阻止自动上传
-}
-
-// 移除已选文件
-const removeFile = (index) => {
-  selectedFiles.value.splice(index, 1)
-}
-
-// 获取文件图标
-const getFileIcon = (file) => {
-  const ext = file.name.split('.').pop().toLowerCase()
-  const type = file.type || ''
-
-  if (type.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) {
-    return FileImageOutlined
-  }
-  if (type === 'application/pdf' || ext === 'pdf') {
-    return FilePdfOutlined
-  }
-  if (type.includes('word') || ['doc', 'docx'].includes(ext)) {
-    return FileWordOutlined
-  }
-  if (type.includes('excel') || type.includes('spreadsheet') || ['xls', 'xlsx'].includes(ext)) {
-    return FileExcelOutlined
-  }
-  if (type.startsWith('text/') || ['txt', 'md', 'json', 'xml'].includes(ext)) {
-    return FileTextOutlined
-  }
-  return FileOutlined
-}
-
-// 格式化文件大小
-const formatFileSize = (bytes) => {
-  if (bytes < 1024) return bytes + ' B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
-  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
-}
-
 // 发送消息
 const sendMessage = async () => {
   const content = inputMessage.value.trim()
-  const files = [...selectedFiles.value]
 
-  if (!content && files.length === 0) return
+  if (!content) return
+  if (!selectedDocument.value) {
+    message.warning('请先选择一个文档')
+    return
+  }
   if (isLoading.value) return
 
   const session = sessions.value.find(s => s.id === currentSessionId.value)
@@ -290,27 +318,19 @@ const sendMessage = async () => {
 
   // 更新会话标题
   if (session.messages.length === 0) {
-    const title = content || `上传了 ${files.length} 个文件`
+    const title = content
     session.title = title.slice(0, 20) + (title.length > 20 ? '...' : '')
   }
-
-  // 构建文件信息用于显示
-  const fileInfos = files.map(f => ({
-    name: f.name,
-    size: f.size,
-    type: f.type
-  }))
 
   // 添加用户消息
   session.messages.push({
     role: 'user',
     content,
     time: new Date(),
-    files: fileInfos
+    files: [{ name: selectedDocumentName.value }]
   })
 
   inputMessage.value = ''
-  selectedFiles.value = []
   scrollToBottom()
 
   // 添加 AI 加载状态消息
@@ -333,8 +353,8 @@ const sendMessage = async () => {
         content: m.content
       }))
 
-    // 调用 API（带文件）
-    const response = await sendMessageApi(content, '注意力既是一切.docx', history)
+    // 调用 API（使用选中的文档）
+    const response = await sendMessageApi(content, selectedDocumentName.value, history)
     // 更新 AI 回复
     const lastMessage = session.messages[session.messages.length - 1]
     lastMessage.loading = false  
@@ -363,6 +383,8 @@ const handleKeyDown = (e) => {
 // 初始化
 onMounted(() => {
   scrollToBottom()
+  // 加载已上传的文档列表
+  fetchDocuments()
 })
 </script>
 
@@ -449,6 +471,90 @@ onMounted(() => {
   overflow: hidden;
 }
 
+/* 文档选择区域 */
+.document-section {
+  border-bottom: 1px solid #f0f0f0;
+  background: #fafafa;
+}
+
+.document-header {
+  padding: 12px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.document-title {
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #262626;
+}
+
+.document-list {
+  padding: 12px 16px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.no-documents {
+  color: #8c8c8c;
+  text-align: center;
+  padding: 16px 0;
+  font-size: 14px;
+}
+
+.document-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.document-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #fff;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  max-width: 200px;
+}
+
+.document-item:hover {
+  border-color: #667eea;
+  background: #f5f5ff;
+}
+
+.document-item.selected {
+  border-color: #667eea;
+  background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%);
+}
+
+.doc-icon {
+  font-size: 16px;
+  color: #667eea;
+  flex-shrink: 0;
+}
+
+.doc-name {
+  font-size: 13px;
+  color: #262626;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.check-icon {
+  font-size: 14px;
+  color: #52c41a;
+  flex-shrink: 0;
+}
+
 .chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -471,54 +577,27 @@ onMounted(() => {
   color: #d9d9d9;
 }
 
+.empty-tip {
+  margin-top: 8px;
+  color: #faad14;
+  font-size: 14px;
+}
+
 /* 输入区域包装 */
 .chat-input-wrapper {
   border-top: 1px solid #f0f0f0;
 }
 
-/* 已选文件列表 */
-.selected-files {
-  padding: 12px 16px 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.file-item {
+/* 当前选中文档提示 */
+.selected-document-tip {
+  padding: 8px 16px;
+  background: #f6ffed;
+  border-bottom: 1px solid #b7eb8f;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px 6px 12px;
-  background: #f5f5f5;
-  border-radius: 6px;
-  max-width: 200px;
-}
-
-.file-info {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  overflow: hidden;
-}
-
-.file-icon {
-  font-size: 16px;
-  color: #1890ff;
-  flex-shrink: 0;
-}
-
-.file-name {
-  font-size: 12px;
-  color: #262626;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-size {
-  font-size: 11px;
-  color: #8c8c8c;
-  flex-shrink: 0;
+  font-size: 13px;
+  color: #52c41a;
 }
 
 /* 输入区域 */
@@ -527,20 +606,6 @@ onMounted(() => {
   display: flex;
   gap: 8px;
   align-items: flex-end;
-}
-
-.upload-btn {
-  flex-shrink: 0;
-  width: 40px;
-  height: 40px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.upload-btn:hover {
-  background: #f5f5f5;
 }
 
 .message-input {
@@ -558,8 +623,12 @@ onMounted(() => {
 .input-tips {
   padding: 0 16px 12px;
   display: flex;
-  justify-content: space-between;
+  justify-content: center;
   font-size: 12px;
   color: #bfbfbf;
+}
+
+.warning-tip {
+  color: #faad14;
 }
 </style>

@@ -112,4 +112,12 @@ export const uploadFile = (files) => {
   })
 }
 
+/**
+ * 获取已上传的文档列表
+ * @returns {Promise}
+ */
+export const getUploadedDocuments = () => {
+  return request.get('/system/chat/documents')
+}
+
 export default request
